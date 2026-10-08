@@ -1309,12 +1309,21 @@ def get_report(design_id: str) -> Verdict:
         if rep is not None:
             stages[stage] = rep
     files = [p.name for p in store.rtl_files(design_id)]
-    ok = bool(stages) and all(s.get("ok") for s in stages.values())
-    summary = (
-        f"{spec.get('module')} [{spec.get('pdk')}] "
-        f"{'ALL CHECKS PASS' if ok else 'INCOMPLETE/FAILING'} "
-        f"({len(stages)} stage(s) recorded)"
-    )
+    # A stage that never ran is NOT a pass. Mandatory stages gate the verdict;
+    # optional ones (formal/power/spice/backend) count only when recorded.
+    mandatory = ("contract", "check", "simulate", "synthesize")
+    missing = [s for s in mandatory if s not in stages]
+    failing = [s for s, r in stages.items() if not r.get("ok")]
+    ok = not missing and not failing
+    if ok:
+        summary = (
+            f"{spec.get('module')} [{spec.get('pdk')}] COMPLETE - {len(stages)} stage(s) verified"
+        )
+    else:
+        summary = f"{spec.get('module')} [{spec.get('pdk')}] INCOMPLETE - " + "; ".join(
+            (["not run: " + ", ".join(missing)] if missing else [])
+            + (["failing: " + ", ".join(failing)] if failing else [])
+        )
     v = Verdict(
         ok=ok,
         stage="report",
@@ -1325,13 +1334,12 @@ def get_report(design_id: str) -> Verdict:
             "spec_hash": spec.get("spec_hash"),
             "files": files,
             "stages": stages,
+            "missing_stages": missing,
             "label": SIGNOFF_LABEL,
             "handoff": "GDS + netlist + SDC + these reports go to "
             "the foundry flow for final DRC/LVS/STA/EM-IR signoff",
         },
     )
     if not ok:
-        v.errors = [f"{s}: failing or missing" for s, r in stages.items() if not r.get("ok")]
-        if not stages:
-            v.errors = ["no stage evidence recorded yet"]
+        v.errors = [f"{s}: failing" for s in failing] + [f"{s}: not run" for s in missing]
     return v

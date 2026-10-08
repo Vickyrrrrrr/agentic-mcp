@@ -175,12 +175,17 @@ async def test_full_design_flow_over_wire(tmp_path):
         r = await client.call_tool("cancel_job", {"design_id": did, "job_id": "job_deadbeef"})
         assert _structured(r)["ok"] is False
 
-        # 8. report carries the honest label + recorded stages
+        # 8. report carries the honest label + recorded stages. sim/synth
+        # never ran here (no tools), so the verdict must be INCOMPLETE
+        # naming the missing mandatory stages - never a false PASS.
         r = await client.call_tool("get_report", {"design_id": did})
         s = _structured(r)
         assert s["evidence"]["label"] == "OSS_LAYOUT_CANDIDATE"
         assert "foundry" in s["evidence"]["handoff"]
         assert "dft" in s["evidence"]["stages"]
+        assert s["ok"] is False
+        assert "INCOMPLETE" in s["summary"]
+        assert set(s["evidence"]["missing_stages"]) == {"simulate", "synthesize"}
 
         # 9. resources + prompts over the wire
         res = await client.list_resources()
