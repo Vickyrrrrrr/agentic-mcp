@@ -51,6 +51,7 @@ class ExecResult:
     cancelled: bool = False
     refused: str = ""
     missing_tool: str = ""
+    via: str = "native"
 
 
 def _refuse(reason: str) -> ExecResult:
@@ -63,15 +64,129 @@ def _cap(text: str, limit: int) -> tuple[str, bool]:
     return text[:limit] + f"\n[truncated: output exceeded {limit} chars]", True
 
 
+# Windows installers sometimes ship a differently-named binary for the same
+# tool (KLayout installs klayout_app.exe). Canonical name first.
+_ALIASES = {
+    "klayout": ("klayout", "klayout_app"),
+}
+
+
+def _native_which(tool: str) -> str | None:
+    for name in _ALIASES.get(tool, (tool,)):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+# ---- WSL: reach Linux-only tools from a Windows host --------------------
+# A Windows MCP server cannot see inside WSL2, but it can invoke distro
+# binaries through `wsl.exe -- <tool> <args>` (direct exec, never shell).
+# Routing is automatic, reported per call ("via": "wsl"), and disabled with
+# AGENTIC_MCP_WSL=0. Design workdirs live on Windows drives, translated to
+# /mnt/<drive>/... with the jail re-checked after translation.
+
+_WSL_DISTRO: str | None | bool = None  # None = unprobed, False = unavailable
+
+
+def wsl_available() -> str | None:
+    """Default WSL distro name if usable, else None. Cached per process."""
+    global _WSL_DISTRO
+    if _WSL_DISTRO is not None:
+        return _WSL_DISTRO or None
+    if os.environ.get("AGENTIC_MCP_WSL") == "0" or os.name != "nt":
+        _WSL_DISTRO = False
+        return None
+    if shutil.which("wsl.exe") is None:
+        _WSL_DISTRO = False
+        return None
+    try:
+        proc = subprocess.run(
+            ["wsl.exe", "--list", "--quiet"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        _WSL_DISTRO = False
+        return None
+    if proc.returncode != 0:
+        _WSL_DISTRO = False
+        return None
+    try:
+        text = proc.stdout.decode("utf-16")
+    except UnicodeDecodeError:
+        text = proc.stdout.decode(errors="replace")
+    names = [ln.strip("\x00 \r\n\t*") for ln in text.splitlines()]
+    names = [n for n in names if n and not n.lower().startswith("windows subsystem")]
+    _WSL_DISTRO = names[0] if names else False
+    return _WSL_DISTRO or None
+
+
+def wsl_which(tool: str) -> str | None:
+    """Linux path of tool inside the default distro, or None."""
+    if wsl_available() is None or tool not in ALLOWLIST:
+        return None
+    try:
+        proc = subprocess.run(
+            ["wsl.exe", "--", "which", tool],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=60, text=True,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    path = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not path.startswith("/"):
+        return None
+    return path
+
+
+def wsl_translate(winpath: str) -> str | None:
+    """C:\\x\\y -> /mnt/c/x/y. None when not a local-drive absolute path."""
+    try:
+        abs_p = os.path.abspath(winpath)
+    except Exception:
+        return None
+    drive, rest = os.path.splitdrive(abs_p)
+    if not drive or len(drive) != 2 or not rest:
+        return None
+    linux = "/mnt/" + drive[0].lower() + rest.replace("\\", "/")
+    if "/../" in linux or linux.endswith("/.."):
+        return None
+    return linux
+
+
+def locate(tool: str) -> tuple[str | None, str]:
+    """Where a tool runs: (binary, 'native'|'wsl') or (None, 'missing').
+
+    Native Windows binaries always win; WSL is the fallback for
+    Linux-only tools (magic, netgen, ...). Uses which() so tests can
+    monkeypatch a single lookup hook."""
+    if tool not in ALLOWLIST:
+        return None, "missing"
+    native = which(tool)
+    if native:
+        return native, "native"
+    if wsl_which(tool):
+        return tool, "wsl"
+    return None, "missing"
+
+
+def available(tool: str) -> bool:
+    return locate(tool)[0] is not None
+
+
 def which(tool: str) -> str | None:
-    return shutil.which(tool)
+    """Native-only lookup (compatibility). Prefer locate()."""
+    return _native_which(tool)
 
 
 def tool_status() -> dict[str, dict[str, str | bool]]:
-    """Discovery probe: which EDA binaries exist. Read-only, no execution."""
-    return {
-        t: {"available": which(t) is not None, "path": which(t) or ""} for t in sorted(ALLOWLIST)
-    }
+    """Discovery probe: native vs WSL vs missing per tool. Read-only."""
+    status = {}
+    for t in sorted(ALLOWLIST):
+        binary, via = locate(t)
+        status[t] = {"available": binary is not None, "via": via, "path": binary or ""}
+    return status
 
 
 def run(
@@ -92,7 +207,7 @@ def run(
         return _refuse("refusing empty or non-string command")
     if argv[0] not in ALLOWLIST:
         return _refuse(f"refusing {argv[0]!r}: not in EDA allowlist")
-    binary = which(argv[0])
+    binary, via = locate(argv[0])
     if binary is None:
         return ExecResult(
             ok=False, code=None, missing_tool=argv[0], stderr=f"{argv[0]} is not installed"
@@ -103,9 +218,16 @@ def run(
         return _refuse(f"refusing unresolvable workdir: {workdir}")
     if not os.path.isdir(root):
         return _refuse(f"refusing missing workdir: {workdir}")
+    if via == "wsl":
+        linux_root = wsl_translate(root)
+        if linux_root is None or not linux_root.startswith("/mnt/"):
+            return _refuse(f"refusing WSL run outside mounted drives: {workdir}")
+        cmd = ["wsl.exe", "--", binary, *argv[1:]]
+    else:
+        cmd = [binary, *argv[1:]]
     try:
         proc = subprocess.Popen(
-            [binary, *argv[1:]],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

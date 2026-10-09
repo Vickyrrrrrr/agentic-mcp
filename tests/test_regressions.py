@@ -70,6 +70,7 @@ def test_prove_uses_relative_sby_path(monkeypatch, tmp_path):
         )
 
     monkeypatch.setattr(eda, "which", fake_which)
+    monkeypatch.setattr(eda, "wsl_which", lambda tool: None)
     monkeypatch.setattr(eda, "run", fake_run)
     v = tools.prove(design_id=did)
     assert v.ok, v.errors
@@ -96,6 +97,7 @@ def test_simulate_verilator_path(monkeypatch, tmp_path):
         return types.SimpleNamespace(ok=True, code=0, stdout="TEST PASSED\n", stderr="")
 
     monkeypatch.setattr(eda, "which", fake_which)
+    monkeypatch.setattr(eda, "wsl_which", lambda tool: None)
     monkeypatch.setattr(eda, "run", fake_run)
     v = tools.simulate(design_id=did)
     assert v.ok and v.summary == "PASS: TEST PASSED", v.errors

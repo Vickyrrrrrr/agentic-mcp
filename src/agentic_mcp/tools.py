@@ -246,7 +246,7 @@ def check_design(design_id: str) -> Verdict:
 
 def _tool_lint(design_id: str, files: dict[str, str]) -> dict:
     workdir = str(store.design_dir(design_id))
-    if eda.which("verilator"):
+    if eda.available("verilator"):
         r = eda.run(
             [
                 "verilator",
@@ -271,7 +271,7 @@ def _tool_lint(design_id: str, files: dict[str, str]) -> dict:
             "diagnostics": [d["message"] for d in diags[:10]]
             or ([(r.stderr or r.stdout or "")[:300]] if not r.ok else []),
         }
-    if eda.which("iverilog"):
+    if eda.available("iverilog"):
         r = eda.run(
             [
                 "iverilog",
@@ -310,7 +310,7 @@ def simulate(design_id: str, timeout_s: int = 120) -> Verdict:
     workdir = store.design_dir(design_id)
     tb = tb_ev.get("tb", "")
     ordered = [f"rtl/{n}" for n in sorted(files) if n != tb] + [f"rtl/{tb}"]
-    if eda.which("iverilog") and eda.which("vvp"):
+    if eda.available("iverilog") and eda.available("vvp"):
         c = eda.run(
             ["iverilog", "-g2012", "-o", "sim.vvp", *ordered],
             str(workdir),
@@ -343,7 +343,7 @@ def simulate(design_id: str, timeout_s: int = 120) -> Verdict:
         verdict.evidence.update({"tool": "iverilog+vvp", "log_tail": log[-2000:]})
         store.write_report(design_id, "simulate", verdict.model_dump())
         return verdict
-    if eda.which("verilator"):
+    if eda.available("verilator"):
         tb_mods = gates.module_names(files.get(tb, ""))
         tb_top = tb_mods[0] if tb_mods else Path(tb).stem
         exe = "simv.exe" if os.name == "nt" else "simv"
@@ -410,7 +410,7 @@ def synthesize(design_id: str, timeout_s: int = 300) -> Verdict:
         return _fail(
             "synthesize", "no synthesizable RTL (only testbenches?)", ["add design files first"]
         )
-    if not eda.which("yosys"):
+    if not eda.available("yosys"):
         return _fail(
             "synthesize",
             "yosys not installed",
@@ -478,7 +478,7 @@ def _flow_prereqs(design_id: str, kind: str) -> tuple[bool, list[str], dict]:
             sdc = [workdir / "design.sdc"]
         net = workdir / "synth_netlist.v"
         missing = []
-        if not eda.which("opensta"):
+        if not eda.available("opensta"):
             missing.append("opensta not installed")
         if not libs:
             missing.append("no .lib liberty file in design (add yours)")
@@ -489,7 +489,7 @@ def _flow_prereqs(design_id: str, kind: str) -> tuple[bool, list[str], dict]:
         return (not missing), missing, {"libs": len(libs), "corners": len(libs)}
     if kind == "pnr":
         missing = []
-        if not (eda.which("openroad") or eda.which("openlane")):
+        if not (eda.available("openroad") or eda.available("openlane")):
             missing.append("neither openroad nor openlane installed")
         if not (workdir / "synth_netlist.v").is_file():
             missing.append("no synth_netlist.v - run synthesize first")
@@ -498,7 +498,7 @@ def _flow_prereqs(design_id: str, kind: str) -> tuple[bool, list[str], dict]:
         gds = list(workdir.glob("*.gds")) + list(workdir.glob("*.oas"))
         tech = list(workdir.glob("*.tech"))
         missing = []
-        if not eda.which("magic"):
+        if not eda.available("magic"):
             missing.append("magic not installed")
         if not gds:
             missing.append("no layout (.gds/.oas) in design — run pnr first")
@@ -508,7 +508,7 @@ def _flow_prereqs(design_id: str, kind: str) -> tuple[bool, list[str], dict]:
     if kind == "lvs":
         missing = []
         for tool, _what in (("magic", "magic (extraction)"), ("netgen", "netgen")):
-            if not eda.which(tool):
+            if not eda.available(tool):
                 missing.append(f"{tool} not installed")
         if not list(workdir.glob("*.gds")):
             missing.append("no .gds layout in design — run pnr first")
@@ -533,7 +533,7 @@ def _flow_prereqs(design_id: str, kind: str) -> tuple[bool, list[str], dict]:
         gds = list(workdir.glob("*.gds"))
         tech = list(workdir.glob("*.tech"))
         missing = []
-        if not eda.which("ngspice"):
+        if not eda.available("ngspice"):
             missing.append("ngspice not installed")
         if not deck and not (gds and tech):
             missing.append("need a .spice/.cir deck, or GDS+tech for scoped extraction")
@@ -758,7 +758,7 @@ def _do_dft(design_id: str, run) -> dict:
     net = workdir / "synth_netlist.v"
     libs = sorted(workdir.glob("*.lib"))
     cell_models = sorted(workdir.glob("*cells*.v")) + sorted((workdir / "rtl").glob("*cells*.v"))
-    if eda.which("fault") and net.is_file() and libs and cell_models:
+    if eda.available("fault") and net.is_file() and libs and cell_models:
         clock = ((spec or {}).get("clock", "") or "clk").split()[0] or "clk"
         reset = re.sub(r"\W+", "", ((spec or {}).get("reset", "") or "rst").split()[0]) or "rst"
         active_low = bool(re.search(r"active\s*-\s*low|_n\b", (spec or {}).get("reset", ""), re.I))
@@ -871,7 +871,7 @@ def _do_spice(design_id: str, scope: str, run) -> dict:
 
 
 def _do_pnr(design_id: str, run) -> dict:
-    if eda.which("openlane"):
+    if eda.available("openlane"):
         return {
             "ok": False,
             "summary": "openlane present but needs a config.json flow setup",
@@ -1180,7 +1180,7 @@ def prove(design_id: str, timeout_s: int = 300) -> Verdict:
     spec, err = store.load_spec(design_id)
     if err:
         return _fail("load", f"design unavailable ({err})", [err])
-    if not eda.which("sby"):
+    if not eda.available("sby"):
         return _fail(
             "formal",
             "sby (SymbiYosys) not installed",
@@ -1236,7 +1236,7 @@ def estimate_power(design_id: str, freq_mhz: float = 0, vdd: float = 0) -> Verdi
     net = workdir / "synth_netlist.v"
     libs = sorted(workdir.glob("*.lib"))
     sdc = workdir / "design.sdc"
-    if eda.which("opensta") and net.is_file() and libs and sdc.is_file():
+    if eda.available("opensta") and net.is_file() and libs and sdc.is_file():
         tcl = "\n".join(
             [
                 f"read_liberty {libs[0].name}",
